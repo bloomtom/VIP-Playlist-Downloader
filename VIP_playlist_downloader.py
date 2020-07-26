@@ -1,6 +1,6 @@
 from ctypes import windll, create_string_buffer
 import xml.etree.ElementTree as ET
-import sys, os, os.path, math, requests, urllib2, struct, argparse, re
+import sys, os, os, math, requests, struct, argparse, re, traceback
 
 # EVENTUAL TRANSCODING WILL USE THIS: https://github.com/devsnd/python-audiotranscode
 
@@ -54,39 +54,32 @@ def getPrettyFileSizes(fsize, size = None):
         return sizelist.get(size)
 
 def download(song, total_songs, current_song, location = ''):
-    u = urllib2.urlopen(song.location)
-    f = open(os.path.join(location, song.filename), 'wb')
 
     file_size_dl = 0
     block_sz = 8192
 
+    filePath = os.path.join(location, song.filename)
+
     try:
-        while True:
-            buffer = u.read(block_sz)
-            if not buffer:
-                break
+        with requests.get(song.location) as r:
+            r.raise_for_status()
+            if (r.is_redirect or (r.history and len(r.history) > 0 and r.history[0].is_redirect)):
+                if (r.url == 'https://www.vipvgm.net/'):
+                    raise Exception(f'404 at address {song.location}.')
+                print(f'URL redirect followed: {song.location} => {r.url}.')
 
-            file_size_dl += len(buffer)
-            f.write(buffer)
-            # print "%d/%d [%3.2f%%]\r" % (file_size_dl, song.filesize, file_size_dl * 100. / song.filesize),
-            lineoutput = "\r[%4d/%4d] [%3.2f%%] %s" % (current_song, total_songs, file_size_dl * 100. / song.filesize, song.filename)
-            totaloutput = lineoutput + ' ' * 80
-
-            print totaloutput[:get_term_size()[0]-1],
+            with open(filePath, 'wb') as f:
+                for c in r.iter_content(chunk_size=block_sz):
+                    f.write(c)
 
         postoutput = "\r[%4d/%4d] %s" % (current_song, total_songs, song.filename) + ' ' * 80
-        print postoutput[:get_term_size()[0]-1]
+        print(postoutput[:get_term_size()[0]-1])
 
-    except BaseException as e:
-        print e
-        f.close()
-        u.close()
-        print; print 'Stopping download and exiting.'
-        sys.exit()
-    finally:
-        f.close()
-        u.close()
-
+    except Exception as e:
+        if os.path.exists(filePath):
+            os.remove(filePath)
+        print('\n[Error] ' + str(e))
+        print(f'[Error] Download failed. Skipping: {song.creator} - {song.title}.\n')
 
 def download_song(song, total_songs, current_song, location='', legacy=False):
     if not os.path.exists(location):
@@ -95,13 +88,13 @@ def download_song(song, total_songs, current_song, location='', legacy=False):
     if legacy:
         download(song, total_songs, current_song, location)
     else:
-        print '[%4d/%4d] Downloading: %s' % (current_song, total_songs, song.filename)
+        print('[%4d/%4d] Downloading: %s' % (current_song, total_songs, song.filename))
         with open(os.path.join(location, song.filename), 'wb') as f:
             try:
                 f.write(song.data)
             except:
                 f.close()
-                print; print 'Stopping download and exiting.'
+                print; print('Stopping download and exiting.')
                 sys.exit()
             finally:
                 f.close()
@@ -142,7 +135,11 @@ class Song(object):
     @property
     def filesize(self):
         if not self._filesize:
-            self._filesize = int(requests.head(self.location).headers['content-length'])
+            try:
+                self._filesize = int(requests.head(self.location).headers['content-length'])
+            except Exception:
+                self._filesize = 0
+            
             self.vlog("Got filesize for '%s': %s" % (self.filename, self._filesize))
 
         return self._filesize
@@ -165,7 +162,7 @@ class Song(object):
 
     def vlog(self, text):
         if self.verbose:
-            print text
+            print(text)
 
 
 if __name__ == '__main__':
@@ -190,45 +187,38 @@ if __name__ == '__main__':
 
     try:
         if [True for c in clargs.dl_folder if c in ':*?<>|']:
-            print NameError("Error: Download folder cannot be named %s" % clargs.dl_folder)
+            print(NameError("Error: Download folder cannot be named %s" % clargs.dl_folder))
             sys.exit(1)
 
-        print "Prepairing to download latest VIP playlist"
+        print("Preparing to download latest VIP playlist")
 
         rosternames = {
-            'normal': 'http://vip.aersia.net/roster.xml',
-            'source': 'http://vip.aersia.net/roster-source.xml',
-            'mellow': 'http://vip.aersia.net/roster-mellow.xml',
-            'exiled': 'http://vip.aersia.net/roster-exiled.xml',
-            'anime':  'http://wap.aersia.net/roster.xml',
-            'couch':  'http://cpp.aersia.net/roster.xml'
-        }
-
-        rosteroffsets = {
-            'normal': (4, -1),
-            'source': (4, -1),
-            'mellow': (3, -2),
-            'exiled': (1, None),
-            'anime':  (3, None),
-            'couch':  (1, None)
+            'normal': 'https://vip.aersia.net/roster.xml',
+            'source': 'https://vip.aersia.net/roster-source.xml',
+            'mellow': 'https://vip.aersia.net/roster-mellow.xml',
+            'exiled': 'https://vip.aersia.net/roster-exiled.xml',
+            'anime':  'https://wap.aersia.net/roster.xml',
+            'couch':  'https://cpp.aersia.net/roster.xml'
         }
 
         xmlroster = rosternames[clargs.dl_playlist]
-        rosteroffset = rosteroffsets[clargs.dl_playlist]
-
 
         roster = requests.get(xmlroster)
-        treeroot = ET.fromstring(roster.text.replace('xmlns="http://xspf.org/ns/0/"',''))
+        treeroot = ET.fromstring(re.sub('xmlns="(.*?)"', '', roster.text))
+        tracks = treeroot.find('trackList')
+        print(tracks[0].find('title').text)
 
-        print treeroot.getchildren()[0][0].find('title').text
-        print # "X Tracks (Last Update: M DD YY)" or something like that
-
-        total_songs = int(treeroot.getchildren()[0][0].find('title').text.split(' ')[0])
         songlist = []
         numnamehacks = 0
-
-        for track in treeroot.getchildren()[0][slice(*rosteroffset)]: # Slightly less dirty hack then the last version, should probably find a clean way around it like filesize checking
+        skipMatch = re.compile('(^Vidya Intarweb Playlist.*|^MOTD\s\d{1,}/\d{1,}/\d{1,}|^Changelog|^Notice$|^Notice\s[IVX]{1,}|^All Tracks$)')
+        
+        for track in tracks:
             song_creator = track.find('creator').text
+
+            matches = skipMatch.search(song_creator)
+            if (matches and len(matches[0]) == len(song_creator)):
+                continue
+
             song_title = track.find('title').text
             song_location = track.find('location').text
 
@@ -239,16 +229,18 @@ if __name__ == '__main__':
                 song.filename = apply_namehacks(song.filename)
                 if song.filename != oldfilename:
                     if clargs.verbose:
-                        print "Applied namehack:\n%s ->\n%s\n" % (oldfilename, song.filename)
+                        print("Applied namehack:\n%s ->\n%s\n" % (oldfilename, song.filename))
                     numnamehacks += 1
 
             songlist.append(song)
 
-        print "Applied %s namehacks" % numnamehacks
-        print 'Beginning downloads to: %s' % os.path.join(os.path.abspath('.'), clargs.dl_folder); print
+        print("Applied %s namehacks" % numnamehacks)
+        print('Beginning downloads to: %s' % os.path.join(os.path.abspath('.'), clargs.dl_folder))
+        print()
 
         total_song_data_size = 0
         downloaded_songs = 0
+        total_songs = len(songlist)
 
         for song in songlist:
             try:
@@ -262,14 +254,14 @@ if __name__ == '__main__':
                         songsmatch = True
 
                     if songsmatch:
-                        print "[Skip]", song.filename
+                        print("[Skip]", song.filename)
                         downloaded_songs += 1
                         continue
                     else:
                         if clargs.dl_noredownload:
-                            print "[Skip]", song.filename
+                            print("[Skip]", song.filename)
                         else:
-                            print "[Redownload]", song.filename
+                            print("[Redownload]", song.filename)
             except Exception as e:
                 pass
 
@@ -277,19 +269,19 @@ if __name__ == '__main__':
                 download_song(song, total_songs, downloaded_songs+1, clargs.dl_folder, legacy=clargs.dl_method=='fancy')
                 total_song_data_size += song.filesize
             else:
-                print "[%4d/%4d] %s" % (downloaded_songs+1, total_songs, song.filename)
+                print("[%4d/%4d] %s" % (downloaded_songs+1, total_songs, song.filename))
 
             downloaded_songs += 1
 
-        print "All done."
+        print("All done.")
     except KeyboardInterrupt:
-        print "\nControl C caught, exiting."
+        print("\nControl C caught, exiting.")
 
     except Exception as e:
-        print e
+        traceback.print_stack()
 
     finally:
         # tdsize = 'GB' if total_song_data_size >= 1000000000 else 'MB'
         # print "Total data downloaded: %s %s" % (getPrettyFileSizes(total_song_data_size, tdsize), tdsize)
-        print "Total data downloaded: %s %s" % getPrettyFileSizes(total_song_data_size)
+        print("Total data downloaded: %s %s" % getPrettyFileSizes(total_song_data_size))
 
